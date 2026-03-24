@@ -13,7 +13,7 @@ import {
   signInAnonymously,
   onAuthStateChanged,
 } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js";
-import { firebaseConfig, appSettings } from "./firebase-config.js";
+import { db, auth } from "./firebase-config.js";
 
 const titleInput = document.getElementById("calendarTitle");
 const monthLabelInput = document.getElementById("monthLabel");
