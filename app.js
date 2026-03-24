@@ -1,6 +1,4 @@
-import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-app.js";
 import {
-  getFirestore,
   doc,
   getDoc,
   getDocs,
@@ -9,11 +7,10 @@ import {
   collection,
 } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore.js";
 import {
-  getAuth,
   signInAnonymously,
   onAuthStateChanged,
 } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js";
-import { db, auth } from "./firebase-config.js";
+import { db, auth, firebaseConfig, appSettings } from "./firebase-config.js";
 
 const titleInput = document.getElementById("calendarTitle");
 const monthLabelInput = document.getElementById("monthLabel");
@@ -32,16 +29,15 @@ const legendMembers = document.getElementById("legendMembers");
 const template = document.getElementById("dayCardTemplate");
 
 const state = {
-  app: null,
-  db: null,
-  auth: null,
+  db,
+  auth,
   user: null,
   meta: {
-    title: db.defaultTitle,
-    monthLabel: db.defaultMonthLabel,
-    startDay: db.defaultStartDay,
-    endDay: db.defaultEndDay,
-    startWeekday: db.defaultStartWeekday,
+    title: appSettings.defaultTitle,
+    monthLabel: appSettings.defaultMonthLabel,
+    startDay: appSettings.defaultStartDay,
+    endDay: appSettings.defaultEndDay,
+    startWeekday: appSettings.defaultStartWeekday,
   },
   days: new Map(),
 };
@@ -52,7 +48,7 @@ function setStatus(message, type = "") {
 }
 
 function hasRealFirebaseConfig() {
-  return firebaseConfig.apiKey && !firebaseConfig.apiKey.startsWith("PASTE_");
+  return Boolean(firebaseConfig?.apiKey && firebaseConfig?.projectId);
 }
 
 function buildDayKey(dateNumber) {
@@ -60,14 +56,23 @@ function buildDayKey(dateNumber) {
 }
 
 function getWeekdayName(index) {
-  return db.weekdayNames[index] || "";
+  return appSettings.weekdayNames?.[index] || "";
+}
+
+function sanitizeSlots(slots) {
+  const normalized = Array.isArray(slots) ? slots.slice(0, 4) : [];
+  while (normalized.length < 4) normalized.push("");
+  return normalized.map((slot) => (appSettings.members.includes(slot) ? slot : ""));
 }
 
 function buildDaysFromMeta(meta) {
   const days = [];
-  const start = Number(meta.startDay);
-  const end = Number(meta.endDay);
+  const start = Math.max(1, Number(meta.startDay) || appSettings.defaultStartDay);
+  const end = Math.max(start, Number(meta.endDay) || appSettings.defaultEndDay);
   let weekdayIndex = Number(meta.startWeekday);
+  if (!Number.isInteger(weekdayIndex) || weekdayIndex < 0 || weekdayIndex > 6) {
+    weekdayIndex = appSettings.defaultStartWeekday;
+  }
 
   for (let date = start; date <= end; date += 1) {
     const key = buildDayKey(date);
@@ -77,8 +82,8 @@ function buildDaysFromMeta(meta) {
       date,
       weekdayIndex,
       weekdayName: getWeekdayName(weekdayIndex),
-      slots: existing?.slots || ["", "", "", ""],
-      notes: existing?.notes || "",
+      slots: sanitizeSlots(existing?.slots),
+      notes: typeof existing?.notes === "string" ? existing.notes : "",
     });
     weekdayIndex = (weekdayIndex + 1) % 7;
   }
@@ -88,7 +93,7 @@ function buildDaysFromMeta(meta) {
 
 function renderWeekdayHeader() {
   weekdayHeader.innerHTML = "";
-  db.weekdayNames.forEach((name) => {
+  appSettings.weekdayNames.forEach((name) => {
     const el = document.createElement("div");
     el.className = "weekday-head";
     el.textContent = name;
@@ -111,7 +116,7 @@ function createSlotSelect(slotIndex, selectedValue, dayObj) {
   emptyOpt.textContent = "ללא";
   select.appendChild(emptyOpt);
 
-  db.members.forEach((member) => {
+  appSettings.members.forEach((member) => {
     const option = document.createElement("option");
     option.value = member;
     option.textContent = member;
@@ -139,20 +144,20 @@ function refreshBadges() {
     const key = card.dataset.dayKey;
     const dayObj = state.days.get(key);
     const badge = card.querySelector(".day-badge");
-    badge.textContent = `${countFilledSlots(dayObj?.slots)} / 4`;
+    if (badge) badge.textContent = `${countFilledSlots(dayObj?.slots)} / 4`;
   });
 }
 
 function updateSummary() {
-  const counts = Object.fromEntries(db.members.map((name) => [name, 0]));
+  const counts = Object.fromEntries(appSettings.members.map((name) => [name, 0]));
   [...state.days.values()].forEach((day) => {
-    day.slots.forEach((slot) => {
+    sanitizeSlots(day.slots).forEach((slot) => {
       if (slot) counts[slot] += 1;
     });
   });
 
   summaryGrid.innerHTML = "";
-  db.members.forEach((member) => {
+  appSettings.members.forEach((member) => {
     const card = document.createElement("div");
     card.className = "summary-card";
     card.innerHTML = `
@@ -166,7 +171,7 @@ function updateSummary() {
 
 function renderLegend() {
   legendMembers.innerHTML = "";
-  db.members.forEach((member) => {
+  appSettings.members.forEach((member) => {
     const pill = document.createElement("div");
     pill.className = "legend-pill";
     pill.textContent = member;
@@ -176,24 +181,27 @@ function renderLegend() {
 
 async function saveDay(dayObj) {
   if (!state.db) {
-    setStatus("לא קיים חיבור ל-Firebase. יש לעדכן firebase-config.js", "warn");
+    setStatus("לא קיים חיבור ל-Firebase.", "warn");
     return;
   }
-  await setDoc(doc(state.db, db.collectionName, dayObj.key), {
+
+  const cleanDay = {
     key: dayObj.key,
     date: dayObj.date,
     weekdayIndex: dayObj.weekdayIndex,
     weekdayName: dayObj.weekdayName,
-    slots: dayObj.slots,
-    notes: dayObj.notes,
+    slots: sanitizeSlots(dayObj.slots),
+    notes: typeof dayObj.notes === "string" ? dayObj.notes : "",
     monthLabel: state.meta.monthLabel,
     updatedAt: serverTimestamp(),
-  }, { merge: true });
+  };
+
+  await setDoc(doc(state.db, appSettings.collectionName, dayObj.key), cleanDay, { merge: true });
 }
 
 async function saveMeta() {
   if (!state.db) return;
-  await setDoc(doc(state.db, ...db.settingsDocPath.split("/")), {
+  await setDoc(doc(state.db, ...appSettings.settingsDocPath.split("/")), {
     ...state.meta,
     updatedAt: serverTimestamp(),
   }, { merge: true });
@@ -204,7 +212,7 @@ function renderCalendar() {
   const days = buildDaysFromMeta(state.meta);
   state.days = new Map(days.map((d) => [d.key, d]));
 
-  for (let i = 0; i < Number(state.meta.startWeekday); i += 1) {
+  for (let i = 0; i < Number(state.meta.startWeekday || 0); i += 1) {
     const empty = document.createElement("div");
     empty.className = "empty-day";
     calendarGrid.appendChild(empty);
@@ -254,12 +262,8 @@ function renderCalendar() {
 
 async function saveAll() {
   try {
-    state.meta.title = titleInput.value.trim() || db.defaultTitle;
-    state.meta.monthLabel = monthLabelInput.value.trim() || db.defaultMonthLabel;
-    state.meta.startDay = Number(startDayInput.value);
-    state.meta.endDay = Number(endDayInput.value);
-    state.meta.startWeekday = Number(startWeekdayInput.value);
-
+    applyMetaFromInputs();
+    renderCalendar();
     await saveMeta();
     for (const day of state.days.values()) {
       await saveDay(day);
@@ -286,16 +290,16 @@ function exportJson() {
 }
 
 async function loadDataFromFirestore() {
-  const metaRef = doc(state.db, ...db.settingsDocPath.split("/"));
+  const metaRef = doc(state.db, ...appSettings.settingsDocPath.split("/"));
   const metaSnap = await getDoc(metaRef);
   if (metaSnap.exists()) {
     const metaData = metaSnap.data();
     state.meta = {
-      title: metaData.title || db.defaultTitle,
-      monthLabel: metaData.monthLabel || db.defaultMonthLabel,
-      startDay: Number(metaData.startDay ?? db.defaultStartDay),
-      endDay: Number(metaData.endDay ?? db.defaultEndDay),
-      startWeekday: Number(metaData.startWeekday ?? db.defaultStartWeekday),
+      title: metaData.title || appSettings.defaultTitle,
+      monthLabel: metaData.monthLabel || appSettings.defaultMonthLabel,
+      startDay: Number(metaData.startDay ?? appSettings.defaultStartDay),
+      endDay: Number(metaData.endDay ?? appSettings.defaultEndDay),
+      startWeekday: Number(metaData.startWeekday ?? appSettings.defaultStartWeekday),
     };
   }
 
@@ -304,18 +308,20 @@ async function loadDataFromFirestore() {
   startDayInput.value = state.meta.startDay;
   endDayInput.value = state.meta.endDay;
   startWeekdayInput.value = state.meta.startWeekday;
+  document.title = state.meta.title;
 
-  const querySnap = await getDocs(collection(state.db, db.collectionName));
+  const querySnap = await getDocs(collection(state.db, appSettings.collectionName));
   const loaded = new Map();
   querySnap.forEach((item) => {
+    if (item.id === "current") return;
     const data = item.data();
     loaded.set(item.id, {
       key: item.id,
-      date: data.date,
-      weekdayIndex: data.weekdayIndex,
-      weekdayName: data.weekdayName,
-      slots: Array.isArray(data.slots) ? data.slots : ["", "", "", ""],
-      notes: data.notes || "",
+      date: Number(data.date),
+      weekdayIndex: Number(data.weekdayIndex),
+      weekdayName: data.weekdayName || getWeekdayName(Number(data.weekdayIndex)),
+      slots: sanitizeSlots(data.slots),
+      notes: typeof data.notes === "string" ? data.notes : "",
     });
   });
   state.days = loaded;
@@ -323,41 +329,41 @@ async function loadDataFromFirestore() {
 
 function applyMetaFromInputs() {
   state.meta = {
-    title: titleInput.value.trim() || db.defaultTitle,
-    monthLabel: monthLabelInput.value.trim() || db.defaultMonthLabel,
-    startDay: Math.max(1, Number(startDayInput.value) || db.defaultStartDay),
-    endDay: Math.max(Number(startDayInput.value) || db.defaultStartDay, Number(endDayInput.value) || db.defaultEndDay),
-    startWeekday: Number(startWeekdayInput.value) || 0,
+    title: titleInput.value.trim() || appSettings.defaultTitle,
+    monthLabel: monthLabelInput.value.trim() || appSettings.defaultMonthLabel,
+    startDay: Math.max(1, Number(startDayInput.value) || appSettings.defaultStartDay),
+    endDay: Math.max(Number(startDayInput.value) || appSettings.defaultStartDay, Number(endDayInput.value) || appSettings.defaultEndDay),
+    startWeekday: Math.min(6, Math.max(0, Number(startWeekdayInput.value) || 0)),
   };
+  document.title = state.meta.title;
 }
 
 async function initFirebase() {
+  renderLegend();
+  renderWeekdayHeader();
+  renderCalendar();
+
   if (!hasRealFirebaseConfig()) {
-    renderLegend();
-    renderWeekdayHeader();
-    renderCalendar();
-    setStatus("המערכת מוכנה, אבל firebase-config.js עדיין עם ערכי placeholder. יש להדביק את קונפיגורציית 8109.", "warn");
+    setStatus("המערכת מוכנה, אבל חסרה קונפיגורציית Firebase תקינה.", "warn");
     return;
   }
 
-  state.app = initializeApp(firebaseConfig);
-  state.db = getFirestore(state.app);
-  state.auth = getAuth(state.app);
-
-  await signInAnonymously(state.auth);
+  try {
+    await signInAnonymously(state.auth);
+  } catch (error) {
+    console.error(error);
+    setStatus(`שגיאת התחברות אנונימית: ${error.message}`, "error");
+    return;
+  }
 
   onAuthStateChanged(state.auth, async (user) => {
     state.user = user;
     try {
       await loadDataFromFirestore();
-      renderLegend();
-      renderWeekdayHeader();
       renderCalendar();
       setStatus(`מחובר ל-Firebase בהצלחה${user ? " · התחברות מאומתת" : ""}`, "ok");
     } catch (error) {
       console.error(error);
-      renderLegend();
-      renderWeekdayHeader();
       renderCalendar();
       setStatus(`התחברות בוצעה אבל טעינת הנתונים נכשלה: ${error.message}`, "error");
     }
@@ -389,7 +395,4 @@ reloadBtn.addEventListener("click", async () => {
 saveAllBtn.addEventListener("click", saveAll);
 exportBtn.addEventListener("click", exportJson);
 
-renderLegend();
-renderWeekdayHeader();
-renderCalendar();
 initFirebase();
